@@ -17,9 +17,9 @@ export default async function Page() {
           <span className="h-1.5 w-1.5 rounded-full bg-brand" />
           Live now
         </span>
-        <h1 className="text-3xl font-semibold tracking-tight">Live Q&amp;A</h1>
+        <h1 className="text-3xl font-semibold tracking-tight">Interactive Hub</h1>
         <p className="mt-1.5 text-sm text-muted">
-          Ask a question, upvote the ones you want answered.
+          Ask questions, answer live polls, and rise on the leaderboard!
         </p>
       </header>
       <QuestionsList initialQuestions={questions} initialHasMore={hasMore} />

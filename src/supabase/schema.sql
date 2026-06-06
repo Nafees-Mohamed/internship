@@ -1,25 +1,14 @@
--- Day 5 schema — run this once in the Supabase SQL Editor.
--- It resets to a clean slate (drops the previous experiment), creates the
--- tables in the shape the guide uses (votes as ROWS, not a column), adds the
--- indexes, and seeds 25 questions so pagination and search have volume.
+-- Run this once in the Supabase SQL Editor to initialize all tables, indexes, RPCs, and seed data.
 
--- ── reset ──────────────────────────────────────────────────────────────────
-drop table if exists votes;
-drop table if exists questions cascade;
-drop function if exists increment_question_votes(uuid);
-
--- ── questions (Feature 1) ────────────────────────────────────────────────────
-create table questions (
+-- ── 1. QUESTIONS & VOTES (Live Q&A) ──────────────────────────────────────────
+create table if not exists questions (
   id          uuid primary key default gen_random_uuid(),
   body        text not null,
   author      text,
   created_at  timestamptz default now()
 );
 
--- ── votes (Feature 3) ────────────────────────────────────────────────────────
--- one row per vote; the FK guarantees a vote points at a real question, and
--- the unique constraint enforces one vote per voter per question.
-create table votes (
+create table if not exists votes (
   id           uuid primary key default gen_random_uuid(),
   question_id  uuid not null references questions(id) on delete cascade,
   voter_id     text not null,
@@ -27,13 +16,71 @@ create table votes (
   unique (question_id, voter_id)
 );
 
-create index votes_question_id_idx on votes (question_id);
+create index if not exists votes_question_id_idx on votes (question_id);
+create index if not exists questions_fts_idx on questions using gin (to_tsvector('english', body));
 
--- ── full-text search index (Feature 5) ───────────────────────────────────────
--- GIN = Generalized INverted index: the word → documents map behind search.
-create index questions_fts_idx on questions using gin (to_tsvector('english', body));
+-- ── 2. VOTERS & SCORE SYSTEM (Leaderboard) ───────────────────────────────────
+create table if not exists voters (
+  voter_id    text primary key,
+  username    text not null,
+  points      integer not null default 0,
+  created_at  timestamptz default now()
+);
 
--- ── seed (~25 questions, spaced out in time so ordering is stable) ───────────
+-- ── 3. POLLS & RESPONSES (Gaming & Polling) ──────────────────────────────────
+create table if not exists polls (
+  id          uuid primary key default gen_random_uuid(),
+  question    text not null,
+  created_at  timestamptz default now()
+);
+
+create table if not exists poll_options (
+  id          uuid primary key default gen_random_uuid(),
+  poll_id     uuid not null references polls(id) on delete cascade,
+  text        text not null,
+  is_correct  boolean not null default false
+);
+
+create index if not exists poll_options_poll_id_idx on poll_options (poll_id);
+
+create table if not exists poll_responses (
+  id           uuid primary key default gen_random_uuid(),
+  poll_id      uuid not null references polls(id) on delete cascade,
+  option_id    uuid not null references poll_options(id) on delete cascade,
+  voter_id     text not null,
+  created_at   timestamptz default now(),
+  unique (poll_id, voter_id)
+);
+
+create index if not exists poll_responses_poll_id_idx on poll_responses (poll_id);
+
+-- ── 4. STORED PROCEDURES (RPCs) ──────────────────────────────────────────────
+
+-- Atomically increments a voter's points, creating their profile if not exists
+create or replace function increment_voter_points(v_id text, pts integer)
+returns void as $$
+begin
+  insert into voters (voter_id, username, points)
+  values (v_id, 'Anonymous Voter', pts)
+  on conflict (voter_id)
+  do update set points = voters.points + pts;
+end;
+$$ language plpgsql;
+
+-- Creates or updates a voter's display name
+create or replace function register_voter(v_id text, u_name text)
+returns void as $$
+begin
+  insert into voters (voter_id, username, points)
+  values (v_id, u_name, 0)
+  on conflict (voter_id)
+  do update set username = u_name;
+end;
+$$ language plpgsql;
+
+-- ── 5. SEED DATA ─────────────────────────────────────────────────────────────
+
+-- Seed Questions (if table is empty)
 insert into questions (body, author, created_at)
 select body, author, now() - (n || ' minutes')::interval
 from (
@@ -44,23 +91,42 @@ from (
     (4,  'How does Postgres full-text search work?', 'Diego'),
     (5,  'Why did my in-memory data vanish on restart?', 'Lena'),
     (6,  'Should I store a vote count or count vote rows?', 'Sam'),
-    (7,  'What is a unique constraint good for?', 'Priya'),
-    (8,  'How do I prevent double voting?', 'Noah'),
-    (9,  'What''s the difference between SSR and hydration?', 'Aisha'),
-    (10, 'How does optimistic UI actually work?', 'Marcus'),
-    (11, 'When do I really need pagination?', 'Ravi'),
-    (12, 'Offset vs cursor pagination — which one?', 'Lena'),
-    (13, 'How do I debounce a search input?', 'Diego'),
-    (14, 'Why must secrets stay on the server?', 'Sam'),
-    (15, 'What is row-level security in Supabase?', 'Noah'),
-    (16, 'How does connection pooling help on Vercel?', 'Priya'),
-    (17, 'What is a GIN index and when do I use it?', 'Ravi'),
-    (18, 'How do foreign keys protect my data?', 'Aisha'),
-    (19, 'When should I move counts into Redis?', 'Marcus'),
-    (20, 'How do I run a database migration safely?', 'Lena'),
-    (21, 'What does on delete cascade actually do?', 'Diego'),
-    (22, 'How do I seed test data quickly?', 'Sam'),
-    (23, 'Why is my Vercel function cold starting?', 'Noah'),
-    (24, 'How do I scale reads with replicas?', 'Ravi'),
-    (25, 'What''s the best way to add auth later?', 'Priya')
-) as seed(n, body, author);
+    (7,  'What is a unique constraint good for?', 'Priya')
+) as seed(n, body, author)
+where not exists (select 1 from questions limit 1);
+
+-- Seed Poll 1 (if polls table is empty)
+do $$
+declare
+  poll1_id uuid;
+begin
+  if not exists (select 1 from polls limit 1) then
+    insert into polls (question) 
+    values ('Which Next.js routing model is used in our project?') 
+    returning id into poll1_id;
+
+    insert into poll_options (poll_id, text, is_correct)
+    values 
+      (poll1_id, 'Pages Router', false),
+      (poll1_id, 'App Router', true),
+      (poll1_id, 'Both Pages and App Router', false);
+  end if;
+end $$;
+
+-- Seed Poll 2 (if polls table is empty)
+do $$
+declare
+  poll2_id uuid;
+begin
+  if not exists (select 1 from polls where question like 'What is the time complexity%') then
+    insert into polls (question) 
+    values ('What is the average time complexity of looking up an item in a Hash Table?') 
+    returning id into poll2_id;
+
+    insert into poll_options (poll_id, text, is_correct)
+    values 
+      (poll2_id, 'O(1)', true),
+      (poll2_id, 'O(log n)', false),
+      (poll2_id, 'O(n)', false);
+  end if;
+end $$;
