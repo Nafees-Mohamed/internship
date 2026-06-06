@@ -23,7 +23,10 @@ export default function QuestionsList({
   const [loading, setLoading] = useState(false);
 
   const [hydrated, setHydrated] = useState(false);
-  useEffect(() => setHydrated(true), []);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setHydrated(true);
+  }, []);
 
   // Debounced search: wait 300ms after typing stops; each keystroke cancels
   // the previous timer, so "deploying" fires one request, not nine.
