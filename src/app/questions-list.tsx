@@ -45,6 +45,9 @@ export default function QuestionsList({
   const [leaderboard, setLeaderboard] = useState<any[]>([]);
   const [loadingLeaderboard, setLoadingLeaderboard] = useState(false);
 
+  // AI state
+  const [improving, setImproving] = useState(false);
+
   const [hydrated, setHydrated] = useState(false);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -165,6 +168,33 @@ export default function QuestionsList({
     setLoading(false);
   }
 
+  // AI draft improvement
+  async function improveDraft() {
+    const trimmed = draft.trim();
+    if (!trimmed) return;
+    setImproving(true);
+    try {
+      const res = await fetch("/api/improve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: trimmed }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.text) {
+          setDraft(data.text);
+        }
+      } else {
+        const data = await res.json();
+        alert(data.error || "Failed to improve question draft");
+      }
+    } catch (err) {
+      console.error("Failed to improve question draft", err);
+    } finally {
+      setImproving(false);
+    }
+  }
+
   // Polls actions
   async function fetchPolls() {
     setLoadingPolls(true);
@@ -191,9 +221,9 @@ export default function QuestionsList({
       if (res.ok) {
         const result = await res.json();
         if (result.isCorrect) {
-          alert("🎉 Correct! You earned 10 points!");
+          alert("Correct! You earned 10 points!");
         } else {
-          alert("❌ Incorrect! Better luck next time!");
+          alert("Incorrect. Better luck next time!");
         }
         fetchPolls();
         fetchProfile();
@@ -265,7 +295,6 @@ export default function QuestionsList({
       {hydrated && (
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border bg-surface p-4 shadow-sm">
           <div className="flex items-center gap-2">
-            <span className="text-xl">👋</span>
             {editingName ? (
               <div className="flex items-center gap-2">
                 <input
@@ -297,13 +326,13 @@ export default function QuestionsList({
                   onClick={() => setEditingName(true)}
                   className="text-xs text-muted hover:text-brand"
                 >
-                  ✏️ Edit
+                  Edit
                 </button>
               </div>
             )}
           </div>
           <div className="flex items-center gap-2 self-start sm:self-auto rounded-full bg-brand-soft px-3 py-1 text-xs font-semibold text-brand">
-            🏆 <span>{points} pts</span>
+            <span>Score: {points} pts</span>
           </div>
         </div>
       )}
@@ -318,7 +347,7 @@ export default function QuestionsList({
               : "border-transparent text-muted hover:text-foreground"
           }`}
         >
-          💬 Live Q&A
+          Live Q&A
         </button>
         <button
           onClick={() => setTab("polls")}
@@ -328,7 +357,7 @@ export default function QuestionsList({
               : "border-transparent text-muted hover:text-foreground"
           }`}
         >
-          🗳️ Live Polls
+          Live Polls
         </button>
         <button
           onClick={() => setTab("leaderboard")}
@@ -338,7 +367,7 @@ export default function QuestionsList({
               : "border-transparent text-muted hover:text-foreground"
           }`}
         >
-          👑 Leaderboard
+          Leaderboard
         </button>
       </div>
 
@@ -356,8 +385,15 @@ export default function QuestionsList({
                 className="flex-1 rounded-xl border bg-background px-4 py-2.5 text-sm outline-none placeholder:text-muted focus:border-brand"
               />
               <button
+                onClick={improveDraft}
+                disabled={improving || !draft.trim()}
+                className="rounded-xl border bg-surface px-4 py-2.5 text-sm font-medium transition-colors hover:border-brand hover:text-brand disabled:opacity-50 shrink-0"
+              >
+                {improving ? "Improving..." : "Improve"}
+              </button>
+              <button
                 onClick={submit}
-                className="rounded-xl bg-brand px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-brand-strong"
+                className="rounded-xl bg-brand px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-brand-strong shrink-0"
               >
                 Ask
               </button>
@@ -373,7 +409,7 @@ export default function QuestionsList({
               className="w-full flex-1 rounded-xl border bg-surface px-4 py-2.5 text-sm outline-none placeholder:text-muted focus:border-brand"
             />
             <span className="shrink-0 text-xs text-muted">
-              {hydrated ? "Interactive ✓" : "Loading interactivity…"}
+              {hydrated ? "Interactive" : "Loading interactivity..."}
             </span>
           </div>
 
@@ -497,8 +533,8 @@ export default function QuestionsList({
                       {hasVoted && (
                         <span className="font-semibold text-brand">
                           {poll.options.find((o: any) => o.id === poll.votedOptionId)?.is_correct 
-                            ? "✅ Correct! (+10 pts)" 
-                            : "❌ Incorrect (+0 pts)"
+                            ? "Correct! (+10 pts)" 
+                            : "Incorrect (+0 pts)"
                           }
                         </span>
                       )}
@@ -517,7 +553,7 @@ export default function QuestionsList({
 
           {/* Create Poll Panel */}
           <div className="rounded-2xl border bg-surface p-5 shadow-sm space-y-4">
-            <h3 className="text-md font-semibold text-foreground">🛠️ Create a New Poll</h3>
+            <h3 className="text-md font-semibold text-foreground">Create a New Poll</h3>
             
             <div className="space-y-3">
               <div>
@@ -592,12 +628,12 @@ export default function QuestionsList({
       {tab === "leaderboard" && (
         <div className="rounded-2xl border bg-surface p-5 shadow-sm space-y-4">
           <div className="flex items-center justify-between mb-2">
-            <h3 className="text-lg font-semibold text-foreground">👑 Top Scorers</h3>
+            <h3 className="text-lg font-semibold text-foreground">Top Scorers</h3>
             <button
               onClick={fetchLeaderboard}
               className="text-xs text-brand hover:underline"
             >
-              🔄 Refresh
+              Refresh
             </button>
           </div>
 
@@ -608,10 +644,6 @@ export default function QuestionsList({
               {leaderboard.map((player, index) => {
                 const isCurrentUser = player.voter_id === getVoterId();
                 const rank = index + 1;
-                let medal = "";
-                if (rank === 1) medal = "🥇";
-                else if (rank === 2) medal = "🥈";
-                else if (rank === 3) medal = "🥉";
 
                 return (
                   <div
@@ -624,7 +656,7 @@ export default function QuestionsList({
                   >
                     <div className="flex items-center gap-3">
                       <span className="w-6 text-sm font-semibold text-center text-muted">
-                        {medal || rank}
+                        {rank}
                       </span>
                       <span className="text-sm text-foreground">
                         {player.username}

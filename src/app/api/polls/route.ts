@@ -30,7 +30,7 @@ export async function GET(req: Request) {
           id: opt.id,
           text: opt.text,
           votesCount,
-          // Hide is_correct unless the voter has already voted on this poll
+          
           is_correct: hasVoted ? opt.is_correct : undefined,
         };
       });
@@ -70,7 +70,7 @@ export async function POST(req: Request) {
       return Response.json({ error: pollError.message }, { status: 500 });
     }
 
-    // 2. Insert the options
+    
     const optionsToInsert = options.map((opt: any) => ({
       poll_id: poll.id,
       text: opt.text.trim(),
@@ -82,7 +82,7 @@ export async function POST(req: Request) {
       .insert(optionsToInsert);
 
     if (optionsError) {
-      // Clean up poll if options fail
+      
       await supabase.from("polls").delete().eq("id", poll.id);
       return Response.json({ error: optionsError.message }, { status: 500 });
     }

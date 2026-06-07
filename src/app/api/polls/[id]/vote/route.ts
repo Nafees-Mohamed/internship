@@ -12,7 +12,7 @@ export async function POST(
       return Response.json({ error: "optionId and voterId are required" }, { status: 400 });
     }
 
-    // 1. Check if the option belongs to this poll
+   
     const { data: option, error: optionError } = await supabase
       .from("poll_options")
       .select("is_correct, poll_id")
@@ -23,20 +23,20 @@ export async function POST(
       return Response.json({ error: "Invalid option or poll mismatch" }, { status: 400 });
     }
 
-    // 2. Insert into poll_responses
+
     const { error: responseError } = await supabase
       .from("poll_responses")
       .insert({ poll_id: pollId, option_id: optionId, voter_id: voterId });
 
     if (responseError) {
       if (responseError.code === "23505") {
-        // Unique constraint violation (already voted)
+        
         return Response.json({ error: "You have already voted on this poll" }, { status: 409 });
       }
       return Response.json({ error: responseError.message }, { status: 500 });
     }
 
-    // 3. Award points if correct (10 points for correct, 0 for incorrect to register them)
+
     const pointsAwarded = option.is_correct ? 10 : 0;
     
     const { error: rpcError } = await supabase.rpc("increment_voter_points", {
@@ -45,7 +45,7 @@ export async function POST(
     });
 
     if (rpcError) {
-      // Log error but don't fail the response since the vote was recorded
+      
       console.error("Failed to update points:", rpcError.message);
     }
 

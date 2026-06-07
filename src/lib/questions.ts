@@ -16,7 +16,7 @@ export async function getQuestionsPage(offset: number, limit: number) {
     votes: q.votes?.[0]?.count ?? 0,
   }));
 
-  const hasMore = rows.length > limit; // got the extra row? there's a next page
+  const hasMore = rows.length > limit; 
   return { questions: rows.slice(0, limit), hasMore };
 }
 
