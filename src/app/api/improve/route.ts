@@ -15,7 +15,7 @@ export async function POST(req: Request) {
 
     const genAI = new GoogleGenerativeAI(apiKey);
   
-    // Use gemini-2.5-flash which is enabled for this API key
+ 
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     const prompt = `You are a helpful assistant for a Q&A and Polling app. Fix any spelling or grammar mistakes in the following question draft, and rephrase it to make it sound clear, concise, and professional. Return ONLY the improved question text. Do not add any introductory or concluding text, quotation marks, or explanations.
