@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
 import { getVoterId } from "@/lib/voter";
 
 type Question = {
@@ -24,6 +25,15 @@ export default function QuestionsList({
 
   // Tabs state
   const [tab, setTab] = useState<"qa" | "polls" | "leaderboard">("qa");
+
+  const searchParams = useSearchParams();
+  const tabParam = searchParams.get("tab");
+
+  useEffect(() => {
+    if (tabParam && (tabParam === "qa" || tabParam === "polls" || tabParam === "leaderboard")) {
+      setTab(tabParam);
+    }
+  }, [tabParam]);
 
   // Voter profile state
   const [username, setUsername] = useState("Anonymous Voter");
