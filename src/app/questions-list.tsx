@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
 import { getVoterId } from "@/lib/voter";
 
@@ -10,6 +10,12 @@ type Question = {
   votes: number;
 };
 
+type Toast = {
+  id: string;
+  type: "success" | "error" | "info";
+  message: string;
+};
+
 export default function QuestionsList({
   initialQuestions,
   initialHasMore,
@@ -17,15 +23,15 @@ export default function QuestionsList({
   initialQuestions: Question[];
   initialHasMore: boolean;
 }) {
-  const [questions, setQuestions] = useState(initialQuestions);
+  const [questions, setQuestions] = useState<Question[]>(initialQuestions);
   const [draft, setDraft] = useState("");
   const [query, setQuery] = useState("");
   const [hasMore, setHasMore] = useState(initialHasMore);
   const [loading, setLoading] = useState(false);
+  const [sortBy, setSortBy] = useState<"top" | "newest">("top");
 
   // Tabs state
   const [tab, setTab] = useState<"qa" | "polls" | "leaderboard">("qa");
-
   const searchParams = useSearchParams();
   const tabParam = searchParams.get("tab");
 
@@ -35,7 +41,20 @@ export default function QuestionsList({
     }
   }, [tabParam]);
 
-  // Voter profile state
+  // Toast notification system
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const addToast = useCallback((message: string, type: "success" | "error" | "info" = "info") => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setToasts((prev) => [...prev, { id, type, message }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3500);
+  }, []);
+
+  // Hydration & Voter profile state
+  const [hydrated, setHydrated] = useState(false);
+  const [voterId, setVoterId] = useState("");
   const [username, setUsername] = useState("Anonymous Voter");
   const [points, setPoints] = useState(0);
   const [editingName, setEditingName] = useState(false);
@@ -55,36 +74,21 @@ export default function QuestionsList({
   const [leaderboard, setLeaderboard] = useState<any[]>([]);
   const [loadingLeaderboard, setLoadingLeaderboard] = useState(false);
 
-  // AI state
+  // AI & Live Auto-refresh state
   const [improving, setImproving] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(false);
 
-  const [hydrated, setHydrated] = useState(false);
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setHydrated(true);
+    setVoterId(getVoterId());
   }, []);
 
   // Fetch profile on hydration
-  useEffect(() => {
-    if (hydrated) {
-      fetchProfile();
-    }
-  }, [hydrated]);
-
-  // Fetch tab specific data
-  useEffect(() => {
-    if (!hydrated) return;
-    if (tab === "polls") {
-      fetchPolls();
-    } else if (tab === "leaderboard") {
-      fetchLeaderboard();
-    }
-  }, [tab, hydrated]);
-
-  // Profile endpoints
-  async function fetchProfile() {
+  const fetchProfile = useCallback(async () => {
+    const id = getVoterId();
+    if (!id) return;
     try {
-      const res = await fetch(`/api/voters?voterId=${getVoterId()}`);
+      const res = await fetch(`/api/voters?voterId=${id}`);
       if (res.ok) {
         const data = await res.json();
         setUsername(data.username || "Anonymous Voter");
@@ -94,94 +98,216 @@ export default function QuestionsList({
     } catch (err) {
       console.error("Failed to fetch profile", err);
     }
-  }
+  }, []);
 
+  useEffect(() => {
+    if (hydrated) {
+      fetchProfile();
+    }
+  }, [hydrated, fetchProfile]);
+
+  // Save username
   async function saveUsername() {
     const trimmed = nameInput.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      addToast("Username cannot be empty", "error");
+      return;
+    }
+    const currentId = getVoterId();
     try {
       const res = await fetch("/api/voters", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ voterId: getVoterId(), username: trimmed }),
+        body: JSON.stringify({ voterId: currentId, username: trimmed }),
       });
       if (res.ok) {
         setUsername(trimmed);
         setEditingName(false);
+        addToast("Display name updated successfully!", "success");
         if (tab === "leaderboard") {
           fetchLeaderboard();
         }
       } else {
         const err = await res.json();
-        alert(err.error || "Failed to save username");
+        addToast(err.error || "Failed to save username", "error");
       }
     } catch (err) {
       console.error("Failed to save username", err);
+      addToast("Network error while saving name", "error");
     }
   }
 
-  // Q&A search query
+  // Polls fetch
+  const fetchPolls = useCallback(async () => {
+    setLoadingPolls(true);
+    const id = getVoterId();
+    try {
+      const res = await fetch(`/api/polls?voterId=${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setPolls(data.polls || []);
+      } else {
+        const err = await res.json();
+        console.error("Polls fetch error:", err);
+      }
+    } catch (err) {
+      console.error("Failed to fetch polls", err);
+    } finally {
+      setLoadingPolls(false);
+    }
+  }, []);
+
+  // Leaderboard fetch
+  const fetchLeaderboard = useCallback(async () => {
+    setLoadingLeaderboard(true);
+    try {
+      const res = await fetch("/api/leaderboard");
+      if (res.ok) {
+        const data = await res.json();
+        setLeaderboard(data.leaderboard || []);
+      }
+    } catch (err) {
+      console.error("Failed to fetch leaderboard", err);
+    } finally {
+      setLoadingLeaderboard(false);
+    }
+  }, []);
+
+  // Tab change handler
+  useEffect(() => {
+    if (!hydrated) return;
+    if (tab === "polls") {
+      fetchPolls();
+    } else if (tab === "leaderboard") {
+      fetchLeaderboard();
+    }
+  }, [tab, hydrated, fetchPolls, fetchLeaderboard]);
+
+  // Live Auto-Refresh Interval (6s)
+  useEffect(() => {
+    if (!autoRefresh || !hydrated) return;
+    const interval = setInterval(() => {
+      if (tab === "polls") fetchPolls();
+      if (tab === "leaderboard") fetchLeaderboard();
+    }, 6000);
+    return () => clearInterval(interval);
+  }, [autoRefresh, hydrated, tab, fetchPolls, fetchLeaderboard]);
+
+  // Q&A search query handler
   useEffect(() => {
     const id = setTimeout(async () => {
-      const url = query
-        ? `/api/questions?q=${encodeURIComponent(query)}`
-        : `/api/questions`;
-      const res = await fetch(url);
-      const data = await res.json();
-      setQuestions(data.questions || []);
-      setHasMore(data.hasMore ?? false);
+      try {
+        const url = query
+          ? `/api/questions?q=${encodeURIComponent(query)}`
+          : `/api/questions`;
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          setQuestions(data.questions || []);
+          setHasMore(data.hasMore ?? false);
+        }
+      } catch (err) {
+        console.error("Error searching questions:", err);
+      }
     }, 300);
 
     return () => clearTimeout(id);
   }, [query]);
 
-  // Q&A actions
+  // Q&A Submit Question
   async function submit() {
-    if (!draft.trim()) return;
+    const trimmed = draft.trim();
+    if (!trimmed) {
+      addToast("Please enter a question draft first", "info");
+      return;
+    }
 
-    const res = await fetch("/api/questions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ body: draft, author: username }),
-    });
-    const created = await res.json();
+    try {
+      const res = await fetch("/api/questions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: trimmed, author: username }),
+      });
 
-    setQuestions((qs) => [{ ...created, votes: 0 }, ...qs]);
-    setDraft("");
+      if (!res.ok) {
+        const errData = await res.json();
+        addToast(errData.error || "Failed to post question", "error");
+        return;
+      }
+
+      const created = await res.json();
+      setQuestions((qs) => [{ ...created, votes: 0 }, ...qs]);
+      setDraft("");
+      addToast("Question submitted successfully!", "success");
+    } catch (err) {
+      console.error("Failed to submit question", err);
+      addToast("Network error while submitting question", "error");
+    }
   }
 
+  // Q&A Upvote Question
   async function upvote(id: string) {
-    // optimistic
+    const currentId = getVoterId();
+    // Optimistic update
     setQuestions((qs) =>
       qs.map((q) => (q.id === id ? { ...q, votes: q.votes + 1 } : q))
     );
 
-    const res = await fetch(`/api/questions/${id}/vote`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ voterId: getVoterId() }),
-    });
+    try {
+      const res = await fetch(`/api/questions/${id}/vote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ voterId: currentId }),
+      });
 
-    if (!res.ok) {
+      if (!res.ok) {
+        // Revert vote
+        setQuestions((qs) =>
+          qs.map((q) => (q.id === id ? { ...q, votes: Math.max(0, q.votes - 1) } : q))
+        );
+
+        if (res.status === 409) {
+          addToast("You have already upvoted this question!", "info");
+        } else {
+          const errData = await res.json();
+          addToast(errData.error || "Failed to record upvote", "error");
+        }
+      } else {
+        addToast("Upvoted!", "success");
+      }
+    } catch (err) {
+      console.error("Upvote failed", err);
       setQuestions((qs) =>
-        qs.map((q) => (q.id === id ? { ...q, votes: q.votes - 1 } : q))
+        qs.map((q) => (q.id === id ? { ...q, votes: Math.max(0, q.votes - 1) } : q))
       );
+      addToast("Network error while upvoting", "error");
     }
   }
 
+  // Load more questions
   async function loadMore() {
     setLoading(true);
-    const res = await fetch(`/api/questions?offset=${questions.length}`);
-    const data = await res.json();
-    setQuestions((qs) => [...qs, ...(data.questions || [])]);
-    setHasMore(data.hasMore ?? false);
-    setLoading(false);
+    try {
+      const res = await fetch(`/api/questions?offset=${questions.length}`);
+      if (res.ok) {
+        const data = await res.json();
+        setQuestions((qs) => [...qs, ...(data.questions || [])]);
+        setHasMore(data.hasMore ?? false);
+      }
+    } catch (err) {
+      console.error("Failed to load more questions", err);
+    } finally {
+      setLoading(false);
+    }
   }
 
   // AI draft improvement
   async function improveDraft() {
     const trimmed = draft.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      addToast("Type a draft question to improve", "info");
+      return;
+    }
     setImproving(true);
     try {
       const res = await fetch("/api/improve", {
@@ -193,64 +319,57 @@ export default function QuestionsList({
         const data = await res.json();
         if (data.text) {
           setDraft(data.text);
+          addToast("Draft improved with AI!", "success");
         }
       } else {
         const data = await res.json();
-        alert(data.error || "Failed to improve question draft");
+        addToast(data.error || "Failed to improve draft", "error");
       }
     } catch (err) {
-      console.error("Failed to improve question draft", err);
+      console.error("Failed to improve draft", err);
+      addToast("AI service unavailable", "error");
     } finally {
       setImproving(false);
     }
   }
 
-  // Polls actions
-  async function fetchPolls() {
-    setLoadingPolls(true);
-    try {
-      const res = await fetch(`/api/polls?voterId=${getVoterId()}`);
-      if (res.ok) {
-        const data = await res.json();
-        setPolls(data.polls || []);
-      }
-    } catch (err) {
-      console.error("Failed to fetch polls", err);
-    } finally {
-      setLoadingPolls(false);
-    }
-  }
-
+  // Poll Voting
   async function submitVote(pollId: string, optionId: string) {
+    const currentId = getVoterId();
     try {
       const res = await fetch(`/api/polls/${pollId}/vote`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ optionId, voterId: getVoterId() }),
+        body: JSON.stringify({ optionId, voterId: currentId }),
       });
       if (res.ok) {
         const result = await res.json();
         if (result.isCorrect) {
-          alert("Correct! You earned 10 points!");
+          addToast("🎉 Correct! You earned 10 points!", "success");
         } else {
-          alert("Incorrect. Better luck next time!");
+          addToast("Incorrect choice. Better luck next time!", "info");
         }
         fetchPolls();
         fetchProfile();
       } else {
         const data = await res.json();
-        alert(data.error || "Failed to vote");
+        addToast(data.error || "Failed to vote", "error");
       }
     } catch (err) {
       console.error("Failed to submit vote", err);
+      addToast("Network error while voting", "error");
     }
   }
 
+  // Poll Creation
   async function createPoll() {
-    if (!pollQuestion.trim()) return;
+    if (!pollQuestion.trim()) {
+      addToast("Please enter a poll question", "error");
+      return;
+    }
     const filledOptions = pollOptions.map((o) => o.trim()).filter(Boolean);
     if (filledOptions.length < 2) {
-      alert("Please provide at least 2 options.");
+      addToast("Please provide at least 2 option choices", "error");
       return;
     }
 
@@ -271,36 +390,52 @@ export default function QuestionsList({
         setPollQuestion("");
         setPollOptions(["", "", ""]);
         setCorrectOptionIdx(0);
+        addToast("Live poll published successfully!", "success");
         fetchPolls();
       } else {
         const data = await res.json();
-        alert(data.error || "Failed to create poll");
+        addToast(data.error || "Failed to create poll", "error");
       }
     } catch (err) {
       console.error("Failed to create poll", err);
+      addToast("Network error while creating poll", "error");
     } finally {
       setCreatingPoll(false);
     }
   }
 
-  // Leaderboard actions
-  async function fetchLeaderboard() {
-    setLoadingLeaderboard(true);
-    try {
-      const res = await fetch("/api/leaderboard");
-      if (res.ok) {
-        const data = await res.json();
-        setLeaderboard(data.leaderboard || []);
-      }
-    } catch (err) {
-      console.error("Failed to fetch leaderboard", err);
-    } finally {
-      setLoadingLeaderboard(false);
-    }
-  }
+  // Sorted questions list
+  const sortedQuestions = [...questions].sort((a, b) => {
+    if (sortBy === "top") return b.votes - a.votes;
+    return 0; // Default created_at order from server
+  });
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      {/* Toast Floating Container */}
+      <div className="fixed bottom-5 right-5 z-[100] flex flex-col gap-2 max-w-sm w-full pointer-events-none px-4">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className={`pointer-events-auto rounded-xl px-4 py-3 text-sm font-medium shadow-lg transition-all transform translate-y-0 flex items-center justify-between border ${
+              toast.type === "success"
+                ? "bg-emerald-900/90 text-emerald-100 border-emerald-700/50 backdrop-blur-md"
+                : toast.type === "error"
+                ? "bg-rose-900/90 text-rose-100 border-rose-700/50 backdrop-blur-md"
+                : "bg-stone-900/90 text-stone-100 border-stone-700/50 backdrop-blur-md"
+            }`}
+          >
+            <span>{toast.message}</span>
+            <button
+              onClick={() => setToasts((prev) => prev.filter((t) => t.id !== toast.id))}
+              className="ml-3 opacity-60 hover:opacity-100 text-xs font-bold"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
+
       {/* Voter Profile Banner */}
       {hydrated && (
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border bg-surface p-4 shadow-sm">
@@ -310,12 +445,14 @@ export default function QuestionsList({
                 <input
                   value={nameInput}
                   onChange={(e) => setNameInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && saveUsername()}
                   className="rounded-lg border bg-background px-3 py-1 text-sm outline-none focus:border-brand"
-                  maxLength={20}
+                  maxLength={25}
+                  placeholder="Enter your name..."
                 />
                 <button
                   onClick={saveUsername}
-                  className="rounded-lg bg-brand px-3 py-1 text-xs font-semibold text-white hover:bg-brand-strong"
+                  className="rounded-lg bg-brand px-3 py-1 text-xs font-semibold text-white hover:bg-brand-strong transition-colors"
                 >
                   Save
                 </button>
@@ -324,7 +461,7 @@ export default function QuestionsList({
                     setEditingName(false);
                     setNameInput(username);
                   }}
-                  className="rounded-lg border px-3 py-1 text-xs text-muted hover:bg-brand-soft"
+                  className="rounded-lg border px-3 py-1 text-xs text-muted hover:bg-brand-soft transition-colors"
                 >
                   Cancel
                 </button>
@@ -334,113 +471,158 @@ export default function QuestionsList({
                 <span className="font-semibold text-foreground">{username}</span>
                 <button
                   onClick={() => setEditingName(true)}
-                  className="text-xs text-muted hover:text-brand"
+                  className="text-xs text-muted hover:text-brand transition-colors underline underline-offset-2"
                 >
-                  Edit
+                  Edit Name
                 </button>
               </div>
             )}
           </div>
-          <div className="flex items-center gap-2 self-start sm:self-auto rounded-full bg-brand-soft px-3 py-1 text-xs font-semibold text-brand">
-            <span>Score: {points} pts</span>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setAutoRefresh(!autoRefresh)}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                autoRefresh
+                  ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+                  : "bg-surface border-warm text-muted hover:text-foreground"
+              }`}
+              title="Toggle automatic updates every 6 seconds"
+            >
+              <span className={`h-2 w-2 rounded-full ${autoRefresh ? "bg-emerald-500 animate-pulse" : "bg-stone-300"}`} />
+              {autoRefresh ? "Live Auto-sync ON" : "Auto-sync OFF"}
+            </button>
+
+            <div className="flex items-center gap-1.5 rounded-full bg-brand-soft px-3 py-1 text-xs font-semibold text-brand">
+              <span>🏆 Score: {points} pts</span>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Tabs Menu */}
+      {/* Navigation Tabs */}
       <div className="flex border-b border-warm">
         <button
           onClick={() => setTab("qa")}
-          className={`flex-1 pb-3 text-center text-sm font-medium border-b-2 transition-colors ${
+          className={`flex-1 pb-3 text-center text-sm font-semibold border-b-2 transition-all ${
             tab === "qa"
-              ? "border-brand text-brand"
+              ? "border-brand text-brand shadow-sm"
               : "border-transparent text-muted hover:text-foreground"
           }`}
         >
-          Live Q&A
+          💬 Live Q&A
         </button>
         <button
           onClick={() => setTab("polls")}
-          className={`flex-1 pb-3 text-center text-sm font-medium border-b-2 transition-colors ${
+          className={`flex-1 pb-3 text-center text-sm font-semibold border-b-2 transition-all ${
             tab === "polls"
-              ? "border-brand text-brand"
+              ? "border-brand text-brand shadow-sm"
               : "border-transparent text-muted hover:text-foreground"
           }`}
         >
-          Live Polls
+          🗳️ Live Polls
         </button>
         <button
           onClick={() => setTab("leaderboard")}
-          className={`flex-1 pb-3 text-center text-sm font-medium border-b-2 transition-colors ${
+          className={`flex-1 pb-3 text-center text-sm font-semibold border-b-2 transition-all ${
             tab === "leaderboard"
-              ? "border-brand text-brand"
+              ? "border-brand text-brand shadow-sm"
               : "border-transparent text-muted hover:text-foreground"
           }`}
         >
-          Leaderboard
+          👑 Leaderboard
         </button>
       </div>
 
-      {/* Tab Contents: Live Q&A */}
+      {/* Tab 1: Live Q&A */}
       {tab === "qa" && (
         <div className="space-y-5">
-          {/* Ask box */}
-          <div className="rounded-2xl border bg-surface p-4 shadow-sm">
-            <div className="flex gap-2">
+          {/* Ask Box */}
+          <div className="rounded-2xl border bg-surface p-4 shadow-sm space-y-2">
+            <div className="flex flex-col sm:flex-row gap-2">
               <input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && submit()}
-                placeholder="Ask a question…"
+                placeholder="Ask a question..."
                 className="flex-1 rounded-xl border bg-background px-4 py-2.5 text-sm outline-none placeholder:text-muted focus:border-brand"
+                maxLength={300}
               />
+              <div className="flex gap-2">
+                <button
+                  onClick={improveDraft}
+                  disabled={improving || !draft.trim()}
+                  className="flex-1 sm:flex-initial rounded-xl border bg-surface px-4 py-2.5 text-sm font-medium transition-colors hover:border-brand hover:text-brand disabled:opacity-50 shrink-0"
+                >
+                  {improving ? "✨ AI Magic..." : "✨ Improve"}
+                </button>
+                <button
+                  onClick={submit}
+                  disabled={!draft.trim()}
+                  className="flex-1 sm:flex-initial rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-brand-strong disabled:opacity-50 shrink-0"
+                >
+                  Ask
+                </button>
+              </div>
+            </div>
+            {draft.length > 0 && (
+              <div className="text-[11px] text-muted text-right pr-1">
+                {draft.length}/300 chars
+              </div>
+            )}
+          </div>
+
+          {/* Search & Sort Bar */}
+          <div className="flex flex-col sm:flex-row items-center gap-3">
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="🔍 Search questions..."
+              className="w-full flex-1 rounded-xl border bg-surface px-4 py-2 text-sm outline-none placeholder:text-muted focus:border-brand"
+            />
+            <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto border rounded-xl p-1 bg-surface">
               <button
-                onClick={improveDraft}
-                disabled={improving || !draft.trim()}
-                className="rounded-xl border bg-surface px-4 py-2.5 text-sm font-medium transition-colors hover:border-brand hover:text-brand disabled:opacity-50 shrink-0"
+                onClick={() => setSortBy("top")}
+                className={`px-3 py-1 text-xs font-semibold rounded-lg transition-colors ${
+                  sortBy === "top"
+                    ? "bg-brand text-white"
+                    : "text-muted hover:text-foreground"
+                }`}
               >
-                {improving ? "Improving..." : "Improve"}
+                Top Voted
               </button>
               <button
-                onClick={submit}
-                className="rounded-xl bg-brand px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-brand-strong shrink-0"
+                onClick={() => setSortBy("newest")}
+                className={`px-3 py-1 text-xs font-semibold rounded-lg transition-colors ${
+                  sortBy === "newest"
+                    ? "bg-brand text-white"
+                    : "text-muted hover:text-foreground"
+                }`}
               >
-                Ask
+                Newest
               </button>
             </div>
           </div>
 
-          {/* Search + hydration status */}
-          <div className="flex items-center gap-3">
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search questions…"
-              className="w-full flex-1 rounded-xl border bg-surface px-4 py-2.5 text-sm outline-none placeholder:text-muted focus:border-brand"
-            />
-            <span className="shrink-0 text-xs text-muted">
-              {hydrated ? "Interactive" : "Loading interactivity..."}
-            </span>
-          </div>
-
           {/* Questions List */}
           <ul className="space-y-3">
-            {questions.map((q) => (
+            {sortedQuestions.map((q) => (
               <li
                 key={q.id}
-                className="flex items-start gap-3 rounded-2xl border bg-surface p-4 shadow-sm transition-shadow hover:shadow-md"
+                className="flex items-start gap-3.5 rounded-2xl border bg-surface p-4 shadow-sm transition-all hover:shadow-md"
               >
                 <button
                   onClick={() => upvote(q.id)}
-                  className="flex shrink-0 flex-col items-center gap-0.5 rounded-xl border px-3.5 py-2 text-brand transition-colors hover:border-brand hover:bg-brand-soft"
+                  className="flex shrink-0 flex-col items-center gap-0.5 rounded-xl border border-warm px-3.5 py-2 text-brand transition-all hover:border-brand hover:bg-brand-soft active:scale-95"
+                  title="Upvote question"
                 >
                   <span className="text-xs leading-none">▲</span>
-                  <span className="text-sm font-semibold leading-none tabular-nums">
+                  <span className="text-sm font-bold leading-none tabular-nums">
                     {q.votes}
                   </span>
                 </button>
                 <div className="min-w-0 flex-1 pt-0.5">
-                  <p className="leading-snug">{q.body}</p>
+                  <p className="leading-snug text-foreground font-medium">{q.body}</p>
                   {q.author && (
                     <p className="mt-1.5 text-xs text-muted">asked by {q.author}</p>
                   )}
@@ -451,37 +633,39 @@ export default function QuestionsList({
 
           {questions.length === 0 && (
             <p className="rounded-2xl border border-dashed p-8 text-center text-sm text-muted">
-              No questions yet — be the first to ask.
+              No questions found — be the first to ask!
             </p>
           )}
 
           {hasMore && (
-            <div className="flex justify-center">
+            <div className="flex justify-center pt-2">
               <button
                 onClick={loadMore}
                 disabled={loading}
-                className="rounded-xl border bg-surface px-5 py-2.5 text-sm font-medium transition-colors hover:border-brand hover:text-brand disabled:opacity-50"
+                className="rounded-xl border bg-surface px-6 py-2.5 text-sm font-semibold transition-colors hover:border-brand hover:text-brand disabled:opacity-50 shadow-sm"
               >
-                {loading ? "Loading…" : "Load more"}
+                {loading ? "Loading..." : "Load more questions"}
               </button>
             </div>
           )}
         </div>
       )}
 
-      {/* Tab Contents: Live Polls */}
+      {/* Tab 2: Live Polls */}
       {tab === "polls" && (
         <div className="space-y-6">
           {loadingPolls && polls.length === 0 ? (
-            <p className="text-center text-sm text-muted">Loading polls...</p>
+            <p className="text-center text-sm text-muted py-8">Loading polls...</p>
           ) : (
             <div className="space-y-4">
               {polls.map((poll) => {
                 const hasVoted = poll.votedOptionId !== null;
 
                 return (
-                  <div key={poll.id} className="rounded-2xl border bg-surface p-5 shadow-sm">
-                    <h3 className="text-lg font-semibold mb-4 text-foreground">{poll.question}</h3>
+                  <div key={poll.id} className="rounded-2xl border bg-surface p-5 shadow-sm space-y-4">
+                    <h3 className="text-lg font-semibold text-foreground leading-snug">
+                      {poll.question}
+                    </h3>
                     
                     <div className="space-y-3">
                       {poll.options?.map((option: any) => {
@@ -491,45 +675,54 @@ export default function QuestionsList({
                           : 0;
 
                         if (hasVoted) {
-                          // Show results view
                           return (
-                            <div key={option.id} className="relative rounded-xl border p-3.5 flex items-center justify-between overflow-hidden">
-                              {/* Progress bar background */}
+                            <div
+                              key={option.id}
+                              className={`relative rounded-xl border p-3.5 flex items-center justify-between overflow-hidden transition-all ${
+                                option.is_correct
+                                  ? "border-amber-400/60 bg-amber-50/20"
+                                  : isSelected
+                                  ? "border-stone-400/60"
+                                  : "border-warm"
+                              }`}
+                            >
+                              {/* Animated Progress bar */}
                               <div 
-                                className={`absolute left-0 top-0 bottom-0 transition-all duration-500 -z-10 ${
+                                className={`absolute left-0 top-0 bottom-0 transition-all duration-700 ease-out -z-10 ${
                                   option.is_correct 
-                                    ? "bg-amber-100 dark:bg-amber-950/40" 
+                                    ? "bg-amber-100/70" 
                                     : isSelected 
-                                      ? "bg-stone-100 dark:bg-stone-800/40" 
-                                      : "bg-stone-50/50 dark:bg-stone-900/10"
+                                      ? "bg-stone-200/60" 
+                                      : "bg-stone-100/40"
                                 }`}
                                 style={{ width: `${percent}%` }}
                               />
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm font-medium text-foreground">{option.text}</span>
+                              <div className="flex items-center gap-2 min-w-0 pr-2">
+                                <span className="text-sm font-medium text-foreground truncate">
+                                  {option.text}
+                                </span>
                                 {option.is_correct && (
-                                  <span className="bg-amber-200 text-amber-800 text-[10px] font-bold px-2 py-0.5 rounded-full">
-                                    Correct Answer
+                                  <span className="bg-amber-200 text-amber-900 text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0">
+                                    ✓ Correct
                                   </span>
                                 )}
                                 {isSelected && (
-                                  <span className="border border-brand text-brand text-[10px] font-bold px-2 py-0.5 rounded-full">
-                                    Your Vote
+                                  <span className="border border-brand text-brand text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0">
+                                    Your Choice
                                   </span>
                                 )}
                               </div>
-                              <span className="text-xs font-semibold text-muted">
+                              <span className="text-xs font-bold text-muted tabular-nums shrink-0">
                                 {option.votesCount} ({percent}%)
                               </span>
                             </div>
                           );
                         } else {
-                          // Show interactive voting buttons
                           return (
                             <button
                               key={option.id}
                               onClick={() => submitVote(poll.id, option.id)}
-                              className="w-full text-left rounded-xl border px-4 py-3 text-sm font-medium hover:border-brand hover:bg-brand-soft hover:text-brand transition-colors text-foreground"
+                              className="w-full text-left rounded-xl border border-warm px-4 py-3 text-sm font-medium hover:border-brand hover:bg-brand-soft hover:text-brand transition-all text-foreground active:scale-[0.99]"
                             >
                               {option.text}
                             </button>
@@ -538,12 +731,12 @@ export default function QuestionsList({
                       })}
                     </div>
                     
-                    <div className="mt-4 flex items-center justify-between text-xs text-muted">
+                    <div className="flex items-center justify-between text-xs text-muted pt-1">
                       <span>Total Votes: {poll.totalVotes}</span>
                       {hasVoted && (
-                        <span className="font-semibold text-brand">
+                        <span className="font-bold text-brand">
                           {poll.options.find((o: any) => o.id === poll.votedOptionId)?.is_correct 
-                            ? "Correct! (+10 pts)" 
+                            ? "✨ Correct! (+10 pts)" 
                             : "Incorrect (+0 pts)"
                           }
                         </span>
@@ -555,29 +748,33 @@ export default function QuestionsList({
 
               {polls.length === 0 && (
                 <p className="rounded-2xl border border-dashed p-8 text-center text-sm text-muted">
-                  No polls active yet.
+                  No polls active right now. Create one below!
                 </p>
               )}
             </div>
           )}
 
-          {/* Create Poll Panel */}
+          {/* Create Poll Box */}
           <div className="rounded-2xl border bg-surface p-5 shadow-sm space-y-4">
-            <h3 className="text-md font-semibold text-foreground">Create a New Poll</h3>
+            <h3 className="text-base font-bold text-foreground flex items-center gap-2">
+              ➕ Create a New Poll
+            </h3>
             
             <div className="space-y-3">
               <div>
-                <label className="block text-xs font-medium text-muted mb-1.5">Question</label>
+                <label className="block text-xs font-semibold text-muted mb-1.5">Question</label>
                 <input
                   value={pollQuestion}
                   onChange={(e) => setPollQuestion(e.target.value)}
-                  placeholder="e.g. What does CPU stand for?"
+                  placeholder="e.g. What is the average time complexity of Hash Table lookup?"
                   className="w-full rounded-xl border bg-background px-4 py-2 text-sm outline-none focus:border-brand"
                 />
               </div>
 
               <div className="space-y-2">
-                <label className="block text-xs font-medium text-muted">Options & Correct Answer</label>
+                <label className="block text-xs font-semibold text-muted">
+                  Options (select the radio button for the correct answer)
+                </label>
                 {pollOptions.map((option, idx) => (
                   <div key={idx} className="flex items-center gap-2">
                     <input
@@ -585,8 +782,8 @@ export default function QuestionsList({
                       name="correct-option"
                       checked={correctOptionIdx === idx}
                       onChange={() => setCorrectOptionIdx(idx)}
-                      className="accent-brand cursor-pointer"
-                      title="Mark as correct option"
+                      className="accent-brand cursor-pointer w-4 h-4"
+                      title="Mark as correct answer"
                     />
                     <input
                       value={option}
@@ -607,73 +804,81 @@ export default function QuestionsList({
                             setCorrectOptionIdx(0);
                           }
                         }}
-                        className="text-xs text-red-500 hover:text-red-700 px-1"
+                        className="text-xs text-rose-600 hover:text-rose-800 px-1 font-semibold"
                       >
                         Remove
                       </button>
                     )}
                   </div>
                 ))}
-                <button
-                  onClick={() => setPollOptions([...pollOptions, ""])}
-                  className="text-xs text-brand font-medium hover:underline block"
-                >
-                  + Add option
-                </button>
+                {pollOptions.length < 6 && (
+                  <button
+                    onClick={() => setPollOptions([...pollOptions, ""])}
+                    className="text-xs text-brand font-semibold hover:underline block pt-1"
+                  >
+                    + Add option
+                  </button>
+                )}
               </div>
 
               <button
                 onClick={createPoll}
                 disabled={creatingPoll || !pollQuestion.trim()}
-                className="w-full mt-2 rounded-xl bg-brand py-2.5 text-sm font-semibold text-white transition-colors hover:bg-brand-strong disabled:opacity-50"
+                className="w-full mt-2 rounded-xl bg-brand py-2.5 text-sm font-semibold text-white transition-colors hover:bg-brand-strong disabled:opacity-50 shadow-sm"
               >
-                {creatingPoll ? "Creating..." : "Publish Poll"}
+                {creatingPoll ? "Publishing..." : "Publish Live Poll"}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Tab Contents: Leaderboard */}
+      {/* Tab 3: Leaderboard */}
       {tab === "leaderboard" && (
         <div className="rounded-2xl border bg-surface p-5 shadow-sm space-y-4">
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-lg font-semibold text-foreground">Top Scorers</h3>
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-bold text-foreground">👑 Top Participants</h3>
             <button
               onClick={fetchLeaderboard}
-              className="text-xs text-brand hover:underline"
+              className="text-xs font-semibold text-brand hover:underline"
             >
-              Refresh
+              🔄 Refresh
             </button>
           </div>
 
           {loadingLeaderboard && leaderboard.length === 0 ? (
-            <p className="text-center text-sm text-muted">Loading leaderboard...</p>
+            <p className="text-center text-sm text-muted py-8">Loading rankings...</p>
           ) : (
             <div className="divide-y divide-warm">
               {leaderboard.map((player, index) => {
-                const isCurrentUser = player.voter_id === getVoterId();
+                const isCurrentUser = player.voter_id === voterId;
                 const rank = index + 1;
 
                 return (
                   <div
                     key={player.voter_id}
-                    className={`flex items-center justify-between py-3 px-2 rounded-xl transition-colors ${
+                    className={`flex items-center justify-between py-3 px-3 rounded-xl transition-all ${
                       isCurrentUser 
-                        ? "bg-brand-soft/40 border border-brand/20 font-bold" 
-                        : ""
+                        ? "bg-brand-soft/50 border border-brand/30 font-bold" 
+                        : "hover:bg-background/50"
                     }`}
                   >
                     <div className="flex items-center gap-3">
-                      <span className="w-6 text-sm font-semibold text-center text-muted">
-                        {rank}
+                      <span className={`w-7 text-center text-sm font-bold ${
+                        rank === 1 ? "text-amber-500 text-base" : rank === 2 ? "text-stone-400 text-base" : rank === 3 ? "text-amber-700 text-base" : "text-muted"
+                      }`}>
+                        {rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : rank}
                       </span>
-                      <span className="text-sm text-foreground">
+                      <span className="text-sm text-foreground font-medium">
                         {player.username}
-                        {isCurrentUser && <span className="ml-1.5 text-[10px] font-bold text-brand bg-brand-soft px-1.5 py-0.5 rounded-full">YOU</span>}
+                        {isCurrentUser && (
+                          <span className="ml-2 text-[10px] font-bold text-brand bg-brand-soft px-2 py-0.5 rounded-full border border-brand/20">
+                            YOU
+                          </span>
+                        )}
                       </span>
                     </div>
-                    <span className="text-sm font-semibold text-brand tabular-nums">
+                    <span className="text-sm font-bold text-brand tabular-nums">
                       {player.points} pts
                     </span>
                   </div>
@@ -682,7 +887,7 @@ export default function QuestionsList({
 
               {leaderboard.length === 0 && (
                 <p className="p-8 text-center text-sm text-muted">
-                  No scores recorded yet. Be the first to vote on a poll!
+                  No points recorded yet. Be the first to answer a poll correctly!
                 </p>
               )}
             </div>

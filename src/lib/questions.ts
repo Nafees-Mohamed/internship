@@ -21,18 +21,36 @@ export async function getQuestionsPage(offset: number, limit: number) {
 }
 
 export async function searchQuestions(q: string, limit: number) {
+  // First try Postgres full-text search
   const { data, error } = await supabase
     .from("questions")
     .select("id, body, author, created_at, votes(count)")
     .textSearch("body", q, { type: "websearch", config: "english" })
     .limit(limit);
 
-  if (error) throw new Error(error.message);
+  if (!error && data) {
+    return data.map((row) => ({
+      id: row.id,
+      body: row.body,
+      author: row.author,
+      votes: row.votes?.[0]?.count ?? 0,
+    }));
+  }
 
-  return (data ?? []).map((row) => ({
+  // Fallback to ILIKE if websearch query fails or throws error
+  const { data: fallbackData, error: fallbackError } = await supabase
+    .from("questions")
+    .select("id, body, author, created_at, votes(count)")
+    .ilike("body", `%${q}%`)
+    .limit(limit);
+
+  if (fallbackError) throw new Error(fallbackError.message);
+
+  return (fallbackData ?? []).map((row) => ({
     id: row.id,
     body: row.body,
     author: row.author,
     votes: row.votes?.[0]?.count ?? 0,
   }));
 }
+
