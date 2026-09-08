@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import { getVoterId } from "@/lib/voter";
 
@@ -16,6 +16,18 @@ type Toast = {
   message: string;
 };
 
+type ChallengeRecord = {
+  pollId: string;
+  question: string;
+  optionSelectedId: string | null;
+  optionSelectedText: string | null;
+  correctOptionText: string;
+  isCorrect: boolean;
+  pointsEarned: number;
+};
+
+const TIMER_PER_QUESTION = 10; // 10 seconds per question
+
 export default function QuestionsList({
   initialQuestions,
   initialHasMore,
@@ -31,12 +43,18 @@ export default function QuestionsList({
   const [sortBy, setSortBy] = useState<"top" | "newest">("top");
 
   // Tabs state
-  const [tab, setTab] = useState<"qa" | "polls" | "leaderboard">("qa");
+  const [tab, setTab] = useState<"qa" | "polls" | "leaderboard" | "challenge">("qa");
   const searchParams = useSearchParams();
   const tabParam = searchParams.get("tab");
 
   useEffect(() => {
-    if (tabParam && (tabParam === "qa" || tabParam === "polls" || tabParam === "leaderboard")) {
+    if (
+      tabParam &&
+      (tabParam === "qa" ||
+        tabParam === "polls" ||
+        tabParam === "leaderboard" ||
+        tabParam === "challenge")
+    ) {
       setTab(tabParam);
     }
   }, [tabParam]);
@@ -77,6 +95,17 @@ export default function QuestionsList({
   // AI & Live Auto-refresh state
   const [improving, setImproving] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
+
+  // ⚡ Rapid-Fire Challenge state
+  const [challengeState, setChallengeState] = useState<"idle" | "running" | "finished">("idle");
+  const [challengeIndex, setChallengeIndex] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(TIMER_PER_QUESTION);
+  const [challengeAnswers, setChallengeAnswers] = useState<ChallengeRecord[]>([]);
+  const [explanations, setExplanations] = useState<
+    Record<string, { loading: boolean; text?: string; error?: string }>
+  >({});
+
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     setHydrated(true);
@@ -146,9 +175,6 @@ export default function QuestionsList({
       if (res.ok) {
         const data = await res.json();
         setPolls(data.polls || []);
-      } else {
-        const err = await res.json();
-        console.error("Polls fetch error:", err);
       }
     } catch (err) {
       console.error("Failed to fetch polls", err);
@@ -176,7 +202,7 @@ export default function QuestionsList({
   // Tab change handler
   useEffect(() => {
     if (!hydrated) return;
-    if (tab === "polls") {
+    if (tab === "polls" || tab === "challenge") {
       fetchPolls();
     } else if (tab === "leaderboard") {
       fetchLeaderboard();
@@ -214,6 +240,133 @@ export default function QuestionsList({
     return () => clearTimeout(id);
   }, [query]);
 
+  // ⚡ Rapid-Fire Challenge Logic
+  const startChallenge = () => {
+    if (polls.length === 0) {
+      addToast("No quiz questions available right now", "error");
+      return;
+    }
+    setChallengeState("running");
+    setChallengeIndex(0);
+    setTimeLeft(TIMER_PER_QUESTION);
+    setChallengeAnswers([]);
+    setExplanations({});
+  };
+
+  const advanceQuestion = useCallback(
+    async (selectedOptId: string | null) => {
+      const currentPoll = polls[challengeIndex];
+      if (!currentPoll) return;
+
+      const selectedOpt = currentPoll.options?.find((o: any) => o.id === selectedOptId);
+      // Determine correct option text (from server or fallback)
+      const correctOpt = currentPoll.options?.find((o: any) => o.is_correct);
+      const correctText = correctOpt ? correctOpt.text : currentPoll.options?.[0]?.text || "N/A";
+
+      let isCorrect = false;
+      let pointsEarned = 0;
+
+      if (selectedOptId) {
+        try {
+          const res = await fetch(`/api/polls/${currentPoll.id}/vote`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ optionId: selectedOptId, voterId: getVoterId() }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            isCorrect = data.isCorrect;
+            pointsEarned = data.pointsAwarded || (isCorrect ? 10 : 0);
+          }
+        } catch (e) {
+          console.error("Error recording vote in challenge:", e);
+        }
+      }
+
+      const record: ChallengeRecord = {
+        pollId: currentPoll.id,
+        question: currentPoll.question,
+        optionSelectedId: selectedOptId,
+        optionSelectedText: selectedOpt ? selectedOpt.text : null,
+        correctOptionText: correctText,
+        isCorrect,
+        pointsEarned,
+      };
+
+      setChallengeAnswers((prev) => [...prev, record]);
+
+      // Move to next question or finish
+      if (challengeIndex + 1 < polls.length) {
+        setChallengeIndex((prev) => prev + 1);
+        setTimeLeft(TIMER_PER_QUESTION);
+      } else {
+        setChallengeState("finished");
+        fetchProfile();
+      }
+    },
+    [polls, challengeIndex, fetchProfile]
+  );
+
+  // Timer interval effect during challenge
+  useEffect(() => {
+    if (challengeState !== "running") return;
+
+    timerRef.current = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(timerRef.current as NodeJS.Timeout);
+          advanceQuestion(null);
+          return TIMER_PER_QUESTION;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [challengeState, challengeIndex, advanceQuestion]);
+
+  // Explain My Answer AI function
+  const fetchExplanation = async (record: ChallengeRecord) => {
+    const key = record.pollId;
+    setExplanations((prev) => ({
+      ...prev,
+      [key]: { loading: true },
+    }));
+
+    try {
+      const res = await fetch("/api/explain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: record.question,
+          userChoice: record.optionSelectedText || "",
+          correctChoice: record.correctOptionText,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setExplanations((prev) => ({
+          ...prev,
+          [key]: { loading: false, text: data.explanation },
+        }));
+      } else {
+        const data = await res.json();
+        setExplanations((prev) => ({
+          ...prev,
+          [key]: { loading: false, error: data.error || "Could not generate explanation" },
+        }));
+      }
+    } catch (err) {
+      setExplanations((prev) => ({
+        ...prev,
+        [key]: { loading: false, error: "Network error fetching AI explanation" },
+      }));
+    }
+  };
+
   // Q&A Submit Question
   async function submit() {
     const trimmed = draft.trim();
@@ -248,7 +401,6 @@ export default function QuestionsList({
   // Q&A Upvote Question
   async function upvote(id: string) {
     const currentId = getVoterId();
-    // Optimistic update
     setQuestions((qs) =>
       qs.map((q) => (q.id === id ? { ...q, votes: q.votes + 1 } : q))
     );
@@ -261,7 +413,6 @@ export default function QuestionsList({
       });
 
       if (!res.ok) {
-        // Revert vote
         setQuestions((qs) =>
           qs.map((q) => (q.id === id ? { ...q, votes: Math.max(0, q.votes - 1) } : q))
         );
@@ -407,8 +558,14 @@ export default function QuestionsList({
   // Sorted questions list
   const sortedQuestions = [...questions].sort((a, b) => {
     if (sortBy === "top") return b.votes - a.votes;
-    return 0; // Default created_at order from server
+    return 0;
   });
+
+  const totalPointsEarnedInChallenge = challengeAnswers.reduce(
+    (sum, a) => sum + a.pointsEarned,
+    0
+  );
+  const correctCount = challengeAnswers.filter((a) => a.isCorrect).length;
 
   return (
     <div className="space-y-6 relative">
@@ -501,30 +658,40 @@ export default function QuestionsList({
       )}
 
       {/* Navigation Tabs */}
-      <div className="flex border-b border-warm">
+      <div className="flex border-b border-warm overflow-x-auto scrollbar-none">
         <button
           onClick={() => setTab("qa")}
-          className={`flex-1 pb-3 text-center text-sm font-semibold border-b-2 transition-all ${
+          className={`flex-1 min-w-[90px] pb-3 text-center text-sm font-semibold border-b-2 transition-all ${
             tab === "qa"
               ? "border-brand text-brand shadow-sm"
               : "border-transparent text-muted hover:text-foreground"
           }`}
         >
-          💬 Live Q&A
+          💬 Q&A
         </button>
         <button
           onClick={() => setTab("polls")}
-          className={`flex-1 pb-3 text-center text-sm font-semibold border-b-2 transition-all ${
+          className={`flex-1 min-w-[90px] pb-3 text-center text-sm font-semibold border-b-2 transition-all ${
             tab === "polls"
               ? "border-brand text-brand shadow-sm"
               : "border-transparent text-muted hover:text-foreground"
           }`}
         >
-          🗳️ Live Polls
+          🗳️ Polls
+        </button>
+        <button
+          onClick={() => setTab("challenge")}
+          className={`flex-1 min-w-[130px] pb-3 text-center text-sm font-semibold border-b-2 transition-all ${
+            tab === "challenge"
+              ? "border-brand text-brand shadow-sm"
+              : "border-transparent text-muted hover:text-foreground"
+          }`}
+        >
+          ⚡ Rapid-Fire
         </button>
         <button
           onClick={() => setTab("leaderboard")}
-          className={`flex-1 pb-3 text-center text-sm font-semibold border-b-2 transition-all ${
+          className={`flex-1 min-w-[110px] pb-3 text-center text-sm font-semibold border-b-2 transition-all ${
             tab === "leaderboard"
               ? "border-brand text-brand shadow-sm"
               : "border-transparent text-muted hover:text-foreground"
@@ -686,7 +853,6 @@ export default function QuestionsList({
                                   : "border-warm"
                               }`}
                             >
-                              {/* Animated Progress bar */}
                               <div 
                                 className={`absolute left-0 top-0 bottom-0 transition-all duration-700 ease-out -z-10 ${
                                   option.is_correct 
@@ -833,7 +999,220 @@ export default function QuestionsList({
         </div>
       )}
 
-      {/* Tab 3: Leaderboard */}
+      {/* Tab 3: ⚡ Rapid-Fire Challenge */}
+      {tab === "challenge" && (
+        <div className="space-y-6">
+          {challengeState === "idle" && (
+            <div className="rounded-2xl border bg-surface p-6 shadow-sm text-center space-y-6">
+              <div className="w-14 h-14 mx-auto rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center text-3xl font-extrabold shadow-inner">
+                ⚡
+              </div>
+              <div className="space-y-2">
+                <h3 className="text-2xl font-extrabold text-foreground">
+                  Rapid-Fire Challenge
+                </h3>
+                <p className="text-sm text-muted max-w-md mx-auto leading-relaxed">
+                  Test your knowledge in a timed quiz mode! Answer one question at a time
+                  before the 10-second timer expires.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3 max-w-md mx-auto pt-2 text-center text-xs">
+                <div className="p-3 rounded-xl border bg-background space-y-1">
+                  <div className="font-bold text-foreground text-sm">⏱️ 10 sec</div>
+                  <div className="text-muted">Per Question</div>
+                </div>
+                <div className="p-3 rounded-xl border bg-background space-y-1">
+                  <div className="font-bold text-brand text-sm">+10 pts</div>
+                  <div className="text-muted">Per Correct Choice</div>
+                </div>
+                <div className="p-3 rounded-xl border bg-background space-y-1">
+                  <div className="font-bold text-foreground text-sm">✨ AI Tutor</div>
+                  <div className="text-muted">Explain Answers</div>
+                </div>
+              </div>
+
+              <button
+                onClick={startChallenge}
+                disabled={polls.length === 0}
+                className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-brand text-white font-bold text-sm shadow-md hover:bg-brand-strong transition-all disabled:opacity-50"
+              >
+                {polls.length === 0 ? "Loading Quiz Questions..." : "🚀 Start Rapid-Fire Quiz"}
+              </button>
+            </div>
+          )}
+
+          {challengeState === "running" && polls[challengeIndex] && (
+            <div className="rounded-2xl border bg-surface p-6 shadow-sm space-y-6">
+              {/* Progress & Countdown Header */}
+              <div className="flex items-center justify-between border-b pb-4">
+                <span className="text-xs font-bold text-muted uppercase tracking-wider">
+                  Question {challengeIndex + 1} of {polls.length}
+                </span>
+
+                <div className="flex items-center gap-2">
+                  <div
+                    className={`flex items-center justify-center w-9 h-9 rounded-full font-bold text-sm tabular-nums border-2 transition-colors ${
+                      timeLeft <= 3
+                        ? "border-rose-500 text-rose-600 bg-rose-50 animate-pulse"
+                        : "border-amber-500 text-amber-600 bg-amber-50"
+                    }`}
+                  >
+                    {timeLeft}s
+                  </div>
+                </div>
+              </div>
+
+              {/* Progress Bar */}
+              <div className="w-full bg-stone-100 rounded-full h-2 overflow-hidden">
+                <div
+                  className="bg-brand h-full transition-all duration-300 ease-linear"
+                  style={{ width: `${((challengeIndex + 1) / polls.length) * 100}%` }}
+                />
+              </div>
+
+              {/* Question Text */}
+              <h3 className="text-xl font-bold text-foreground leading-snug">
+                {polls[challengeIndex].question}
+              </h3>
+
+              {/* Multiple Choice Options */}
+              <div className="space-y-3 pt-2">
+                {polls[challengeIndex].options?.map((option: any) => (
+                  <button
+                    key={option.id}
+                    onClick={() => advanceQuestion(option.id)}
+                    className="w-full text-left rounded-xl border border-warm px-4 py-3.5 text-sm font-semibold hover:border-brand hover:bg-brand-soft hover:text-brand transition-all text-foreground active:scale-[0.99] flex items-center justify-between"
+                  >
+                    <span>{option.text}</span>
+                    <span className="text-xs text-muted font-normal">Select ➔</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {challengeState === "finished" && (
+            <div className="space-y-6">
+              {/* Score Summary Card */}
+              <div className="rounded-2xl border bg-surface p-6 shadow-sm text-center space-y-4">
+                <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 text-2xl font-bold">
+                  🏆
+                </div>
+                <div>
+                  <h3 className="text-2xl font-extrabold text-foreground">Challenge Complete!</h3>
+                  <p className="text-sm text-muted mt-1">
+                    You answered {correctCount} out of {challengeAnswers.length} questions correctly.
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-center gap-6 py-2">
+                  <div className="text-center">
+                    <div className="text-2xl font-extrabold text-brand tabular-nums">
+                      +{totalPointsEarnedInChallenge} pts
+                    </div>
+                    <div className="text-xs font-medium text-muted">Points Earned</div>
+                  </div>
+                  <div className="h-8 w-px bg-warm" />
+                  <div className="text-center">
+                    <div className="text-2xl font-extrabold text-foreground tabular-nums">
+                      {Math.round((correctCount / (challengeAnswers.length || 1)) * 100)}%
+                    </div>
+                    <div className="text-xs font-medium text-muted">Accuracy</div>
+                  </div>
+                </div>
+
+                <button
+                  onClick={startChallenge}
+                  className="px-6 py-2.5 rounded-xl bg-brand text-white font-semibold text-sm hover:bg-brand-strong transition-all shadow-sm"
+                >
+                  🔄 Play Again
+                </button>
+              </div>
+
+              {/* Answers Review & Explain My Answer Section */}
+              <div className="rounded-2xl border bg-surface p-5 shadow-sm space-y-4">
+                <h4 className="text-base font-bold text-foreground">Review Answers & AI Explanations</h4>
+
+                <div className="space-y-4 divide-y divide-warm">
+                  {challengeAnswers.map((record, index) => {
+                    const expState = explanations[record.pollId];
+
+                    return (
+                      <div key={record.pollId} className="pt-4 first:pt-0 space-y-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <span className="text-xs font-bold text-muted mr-2">Q{index + 1}</span>
+                            <span className="text-sm font-semibold text-foreground">
+                              {record.question}
+                            </span>
+                          </div>
+                          <span
+                            className={`px-2.5 py-0.5 rounded-full text-xs font-bold shrink-0 ${
+                              record.isCorrect
+                                ? "bg-emerald-100 text-emerald-800"
+                                : "bg-rose-100 text-rose-800"
+                            }`}
+                          >
+                            {record.isCorrect ? "✓ Correct (+10 pts)" : "✗ Incorrect"}
+                          </span>
+                        </div>
+
+                        {/* Answer Choices summary */}
+                        <div className="text-xs space-y-1 bg-background p-3 rounded-xl border">
+                          <div className="flex items-center justify-between">
+                            <span className="text-muted">Your Answer:</span>
+                            <span className={`font-semibold ${record.isCorrect ? "text-emerald-700" : "text-rose-600"}`}>
+                              {record.optionSelectedText || "No answer (Time expired)"}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-muted">Correct Answer:</span>
+                            <span className="font-semibold text-foreground">
+                              {record.correctOptionText}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* ✨ Explain My Answer Button */}
+                        <div>
+                          {!expState?.text && (
+                            <button
+                              onClick={() => fetchExplanation(record)}
+                              disabled={expState?.loading}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-brand/40 bg-brand-soft/40 text-brand font-semibold text-xs hover:bg-brand-soft transition-all disabled:opacity-50"
+                            >
+                              {expState?.loading ? "✨ Generating AI Explanation..." : "✨ Explain My Answer"}
+                            </button>
+                          )}
+
+                          {/* AI Explanation Card */}
+                          {expState?.text && (
+                            <div className="mt-2 p-3.5 rounded-xl bg-amber-50/60 border border-amber-200 text-xs text-stone-800 space-y-1 animate-fadeIn">
+                              <div className="font-bold text-amber-900 flex items-center gap-1">
+                                <span>🤖 Gemini AI Explanation:</span>
+                              </div>
+                              <p className="leading-relaxed">{expState.text}</p>
+                            </div>
+                          )}
+
+                          {expState?.error && (
+                            <p className="mt-1 text-xs text-rose-600 font-medium">
+                              {expState.error}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Tab 4: Leaderboard */}
       {tab === "leaderboard" && (
         <div className="rounded-2xl border bg-surface p-5 shadow-sm space-y-4">
           <div className="flex items-center justify-between">
