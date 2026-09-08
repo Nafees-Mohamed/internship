@@ -217,8 +217,16 @@ class MemoryStore {
       this.incrementVoterPoints(voterId, pointsAwarded);
     }
 
-    return { ok: true, isCorrect: option.is_correct, pointsAwarded };
+    const correctOpt = poll.options.find((o) => o.is_correct);
+    return {
+      ok: true,
+      isCorrect: option.is_correct,
+      pointsAwarded,
+      correctOptionId: correctOpt?.id || null,
+      correctOptionText: correctOpt?.text || "N/A",
+    };
   }
+
 
   // Voter & Leaderboard methods
   getVoter(voterId: string) {

@@ -15,9 +15,10 @@ export async function POST(
 
     const { data: option, error: optionError } = await supabase
       .from("poll_options")
-      .select("is_correct, poll_id")
+      .select("id, text, is_correct, poll_id")
       .eq("id", optionId)
       .single();
+
 
     if (optionError || !option || option.poll_id !== pollId) {
       console.warn("Supabase poll option check failed, checking memory store:", optionError?.message);
@@ -56,11 +57,21 @@ export async function POST(
     }
 
 
+    const { data: correctOpt } = await supabase
+      .from("poll_options")
+      .select("id, text")
+      .eq("poll_id", pollId)
+      .eq("is_correct", true)
+      .maybeSingle();
+
     return Response.json({
       ok: true,
       isCorrect: option.is_correct,
       pointsAwarded,
+      correctOptionId: correctOpt?.id || null,
+      correctOptionText: correctOpt?.text || option.text,
     });
+
   } catch (err: any) {
     console.warn("Supabase poll vote network error, using memory store:", err.message);
     const { id: pollId } = await params;

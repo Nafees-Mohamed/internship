@@ -101,6 +101,9 @@ export default function QuestionsList({
   const [challengeIndex, setChallengeIndex] = useState(0);
   const [timeLeft, setTimeLeft] = useState(TIMER_PER_QUESTION);
   const [challengeAnswers, setChallengeAnswers] = useState<ChallengeRecord[]>([]);
+  const [selectedOptId, setSelectedOptId] = useState<string | null>(null);
+  const [isTransitioning, setIsTransitioning] = useState(false);
+
   const [explanations, setExplanations] = useState<
     Record<string, { loading: boolean; text?: string; error?: string }>
   >({});
@@ -240,7 +243,7 @@ export default function QuestionsList({
     return () => clearTimeout(id);
   }, [query]);
 
-  // ⚡ Rapid-Fire Challenge Logic
+  // ⚡ Rapid-Fire Challenge Start
   const startChallenge = () => {
     if (polls.length === 0) {
       addToast("No quiz questions available right now", "error");
@@ -250,43 +253,58 @@ export default function QuestionsList({
     setChallengeIndex(0);
     setTimeLeft(TIMER_PER_QUESTION);
     setChallengeAnswers([]);
+    setSelectedOptId(null);
+    setIsTransitioning(false);
     setExplanations({});
   };
 
-  const advanceQuestion = useCallback(
-    async (selectedOptId: string | null) => {
+  // ⚡ Rapid-Fire Answer Selection with Instant Visual Feedback
+  const handleSelectOption = useCallback(
+    async (optId: string | null) => {
+      if (isTransitioning) return; // Prevent double-clicks during transition
+
+      setIsTransitioning(true);
+      setSelectedOptId(optId);
+
       const currentPoll = polls[challengeIndex];
-      if (!currentPoll) return;
+      if (!currentPoll) {
+        setIsTransitioning(false);
+        return;
+      }
 
-      const selectedOpt = currentPoll.options?.find((o: any) => o.id === selectedOptId);
-      // Determine correct option text (from server or fallback)
-      const correctOpt = currentPoll.options?.find((o: any) => o.is_correct);
-      const correctText = correctOpt ? correctOpt.text : currentPoll.options?.[0]?.text || "N/A";
-
+      const selectedOpt = currentPoll.options?.find((o: any) => o.id === optId);
       let isCorrect = false;
       let pointsEarned = 0;
+      let correctText = currentPoll.options?.find((o: any) => o.is_correct)?.text || "";
 
-      if (selectedOptId) {
+      if (optId) {
         try {
           const res = await fetch(`/api/polls/${currentPoll.id}/vote`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ optionId: selectedOptId, voterId: getVoterId() }),
+            body: JSON.stringify({ optionId: optId, voterId: getVoterId() }),
           });
           if (res.ok) {
             const data = await res.json();
-            isCorrect = data.isCorrect;
+            isCorrect = !!data.isCorrect;
             pointsEarned = data.pointsAwarded || (isCorrect ? 10 : 0);
+            if (data.correctOptionText) {
+              correctText = data.correctOptionText;
+            }
           }
         } catch (e) {
           console.error("Error recording vote in challenge:", e);
         }
       }
 
+      if (!correctText) {
+        correctText = currentPoll.options?.[0]?.text || "N/A";
+      }
+
       const record: ChallengeRecord = {
         pollId: currentPoll.id,
         question: currentPoll.question,
-        optionSelectedId: selectedOptId,
+        optionSelectedId: optId,
         optionSelectedText: selectedOpt ? selectedOpt.text : null,
         correctOptionText: correctText,
         isCorrect,
@@ -295,28 +313,33 @@ export default function QuestionsList({
 
       setChallengeAnswers((prev) => [...prev, record]);
 
-      // Move to next question or finish
-      if (challengeIndex + 1 < polls.length) {
-        setChallengeIndex((prev) => prev + 1);
-        setTimeLeft(TIMER_PER_QUESTION);
-      } else {
-        setChallengeState("finished");
-        fetchProfile();
-      }
+      // Smooth 500ms feedback pause before advancing question
+      setTimeout(() => {
+        if (challengeIndex + 1 < polls.length) {
+          setChallengeIndex((prev) => prev + 1);
+          setTimeLeft(TIMER_PER_QUESTION);
+          setSelectedOptId(null);
+          setIsTransitioning(false);
+        } else {
+          setChallengeState("finished");
+          setIsTransitioning(false);
+          fetchProfile();
+        }
+      }, 500);
     },
-    [polls, challengeIndex, fetchProfile]
+    [polls, challengeIndex, isTransitioning, fetchProfile]
   );
 
   // Timer interval effect during challenge
   useEffect(() => {
-    if (challengeState !== "running") return;
+    if (challengeState !== "running" || isTransitioning) return;
 
     timerRef.current = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
           clearInterval(timerRef.current as NodeJS.Timeout);
-          advanceQuestion(null);
-          return TIMER_PER_QUESTION;
+          handleSelectOption(null); // Time expired auto-advance
+          return 0;
         }
         return prev - 1;
       });
@@ -325,7 +348,7 @@ export default function QuestionsList({
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [challengeState, challengeIndex, advanceQuestion]);
+  }, [challengeState, challengeIndex, isTransitioning, handleSelectOption]);
 
   // Explain My Answer AI function
   const fetchExplanation = async (record: ChallengeRecord) => {
@@ -1076,18 +1099,35 @@ export default function QuestionsList({
                 {polls[challengeIndex].question}
               </h3>
 
-              {/* Multiple Choice Options */}
+              {/* Multiple Choice Options with Instant Visual Feedback */}
               <div className="space-y-3 pt-2">
-                {polls[challengeIndex].options?.map((option: any) => (
-                  <button
-                    key={option.id}
-                    onClick={() => advanceQuestion(option.id)}
-                    className="w-full text-left rounded-xl border border-warm px-4 py-3.5 text-sm font-semibold hover:border-brand hover:bg-brand-soft hover:text-brand transition-all text-foreground active:scale-[0.99] flex items-center justify-between"
-                  >
-                    <span>{option.text}</span>
-                    <span className="text-xs text-muted font-normal">Select ➔</span>
-                  </button>
-                ))}
+                {polls[challengeIndex].options?.map((option: any) => {
+                  const isSelected = selectedOptId === option.id;
+
+                  return (
+                    <button
+                      key={option.id}
+                      onClick={() => handleSelectOption(option.id)}
+                      disabled={isTransitioning}
+                      className={`w-full text-left rounded-xl border px-4 py-3.5 text-sm font-semibold transition-all flex items-center justify-between ${
+                        isSelected
+                          ? "border-brand bg-brand-soft/80 text-brand ring-2 ring-brand/30 shadow-md"
+                          : isTransitioning
+                          ? "border-warm opacity-60 cursor-not-allowed"
+                          : "border-warm hover:border-brand hover:bg-brand-soft/40 hover:text-brand text-foreground active:scale-[0.99] cursor-pointer"
+                      }`}
+                    >
+                      <span>{option.text}</span>
+                      {isSelected ? (
+                        <span className="text-xs font-bold bg-brand text-white px-2 py-0.5 rounded-md animate-pulse">
+                          ✓ Selected
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted font-normal">Select ➔</span>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
