@@ -1,4 +1,5 @@
 import { supabase } from "@/lib/supabase";
+import { memoryStore } from "@/lib/store";
 
 export async function GET(req: Request) {
   try {
@@ -17,7 +18,8 @@ export async function GET(req: Request) {
       .order("created_at", { ascending: false });
 
     if (error) {
-      return Response.json({ error: error.message }, { status: 500 });
+      console.warn("Supabase GET polls failed, using memory store:", error.message);
+      return Response.json({ polls: memoryStore.getPolls(voterId) });
     }
 
     const formattedPolls = (data ?? []).map((poll: any) => {
@@ -30,7 +32,6 @@ export async function GET(req: Request) {
           id: opt.id,
           text: opt.text,
           votesCount,
-          
           is_correct: hasVoted ? opt.is_correct : undefined,
         };
       });
@@ -47,7 +48,10 @@ export async function GET(req: Request) {
 
     return Response.json({ polls: formattedPolls });
   } catch (err: any) {
-    return Response.json({ error: err.message }, { status: 500 });
+    console.warn("Supabase GET polls network error, using memory store:", err.message);
+    const { searchParams } = new URL(req.url);
+    const voterId = searchParams.get("voterId");
+    return Response.json({ polls: memoryStore.getPolls(voterId) });
   }
 }
 
@@ -59,7 +63,6 @@ export async function POST(req: Request) {
       return Response.json({ error: "question and at least 2 options are required" }, { status: 400 });
     }
 
-    // 1. Insert the poll
     const { data: poll, error: pollError } = await supabase
       .from("polls")
       .insert({ question: question.trim() })
@@ -67,10 +70,11 @@ export async function POST(req: Request) {
       .single();
 
     if (pollError) {
-      return Response.json({ error: pollError.message }, { status: 500 });
+      console.warn("Supabase create poll failed, using memory store:", pollError.message);
+      const created = memoryStore.createPoll(question.trim(), options);
+      return Response.json(created);
     }
 
-    
     const optionsToInsert = options.map((opt: any) => ({
       poll_id: poll.id,
       text: opt.text.trim(),
@@ -82,13 +86,21 @@ export async function POST(req: Request) {
       .insert(optionsToInsert);
 
     if (optionsError) {
-      
       await supabase.from("polls").delete().eq("id", poll.id);
-      return Response.json({ error: optionsError.message }, { status: 500 });
+      console.warn("Supabase insert options failed, using memory store:", optionsError.message);
+      const created = memoryStore.createPoll(question.trim(), options);
+      return Response.json(created);
     }
 
     return Response.json({ id: poll.id, question: poll.question });
   } catch (err: any) {
-    return Response.json({ error: err.message }, { status: 500 });
+    console.warn("Supabase POST poll error, using memory store:", err.message);
+    try {
+      const { question, options } = await req.json();
+      const created = memoryStore.createPoll(question.trim(), options);
+      return Response.json(created);
+    } catch (e) {
+      return Response.json({ error: "Failed to create poll" }, { status: 500 });
+    }
   }
 }

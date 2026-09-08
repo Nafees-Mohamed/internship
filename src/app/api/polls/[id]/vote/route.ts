@@ -1,4 +1,5 @@
 import { supabase } from "@/lib/supabase";
+import { memoryStore } from "@/lib/store";
 
 export async function POST(
   req: Request,
@@ -12,7 +13,6 @@ export async function POST(
       return Response.json({ error: "optionId and voterId are required" }, { status: 400 });
     }
 
-   
     const { data: option, error: optionError } = await supabase
       .from("poll_options")
       .select("is_correct, poll_id")
@@ -20,9 +20,13 @@ export async function POST(
       .single();
 
     if (optionError || !option || option.poll_id !== pollId) {
-      return Response.json({ error: "Invalid option or poll mismatch" }, { status: 400 });
+      console.warn("Supabase poll option check failed, checking memory store:", optionError?.message);
+      const res = memoryStore.votePoll(pollId, optionId, voterId);
+      if (res.error) {
+        return Response.json({ error: res.error }, { status: res.status });
+      }
+      return Response.json(res);
     }
-
 
     const { error: responseError } = await supabase
       .from("poll_responses")
@@ -30,12 +34,15 @@ export async function POST(
 
     if (responseError) {
       if (responseError.code === "23505") {
-        
         return Response.json({ error: "You have already voted on this poll" }, { status: 409 });
       }
-      return Response.json({ error: responseError.message }, { status: 500 });
+      console.warn("Supabase response insert failed, using memory store:", responseError.message);
+      const res = memoryStore.votePoll(pollId, optionId, voterId);
+      if (res.error) {
+        return Response.json({ error: res.error }, { status: res.status });
+      }
+      return Response.json(res);
     }
-
 
     const pointsAwarded = option.is_correct ? 10 : 0;
     
@@ -45,9 +52,9 @@ export async function POST(
     });
 
     if (rpcError) {
-      
-      console.error("Failed to update points:", rpcError.message);
+      memoryStore.incrementVoterPoints(voterId, pointsAwarded);
     }
+
 
     return Response.json({
       ok: true,
@@ -55,6 +62,13 @@ export async function POST(
       pointsAwarded,
     });
   } catch (err: any) {
-    return Response.json({ error: err.message }, { status: 500 });
+    console.warn("Supabase poll vote network error, using memory store:", err.message);
+    const { id: pollId } = await params;
+    const { optionId, voterId } = await req.json().catch(() => ({ optionId: "", voterId: "" }));
+    const res = memoryStore.votePoll(pollId, optionId, voterId);
+    if (res.error) {
+      return Response.json({ error: res.error }, { status: res.status });
+    }
+    return Response.json(res);
   }
 }

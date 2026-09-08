@@ -1,4 +1,5 @@
 import { supabase } from "@/lib/supabase";
+import { memoryStore } from "@/lib/store";
 
 export async function GET() {
   try {
@@ -9,11 +10,13 @@ export async function GET() {
       .limit(50);
 
     if (error) {
-      return Response.json({ error: error.message }, { status: 500 });
+      console.warn("Supabase leaderboard fetch failed, using memory store:", error.message);
+      return Response.json({ leaderboard: memoryStore.getLeaderboard() });
     }
 
     return Response.json({ leaderboard: data ?? [] });
   } catch (err: any) {
-    return Response.json({ error: err.message }, { status: 500 });
+    console.warn("Supabase leaderboard network error, using memory store:", err.message);
+    return Response.json({ leaderboard: memoryStore.getLeaderboard() });
   }
 }
